@@ -498,6 +498,12 @@ impl State {
 
     fn read_wg_peers(&mut self, daemon: &Daemon) -> Result<()> {
         let (_, _, wg_peers) = wg_dump(&daemon.config)?;
+
+        // Clear old known endpoints if any
+        for (_, peer) in self.peers.iter_mut() {
+            peer.endpoint = None;
+        }
+
         for (pk, endpoint, last_seen) in wg_peers {
             match self.peers.get_mut(&pk) {
                 Some(i) => {
