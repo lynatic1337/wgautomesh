@@ -379,8 +379,7 @@ impl State {
                 }
             }
             endpoints.sort();
-            if !endpoints.is_empty() {
-                let endpoint = endpoints[i % endpoints.len()];
+            if let Some(endpoint) = endpoints.get(i % endpoints.len()) {
                 info!("Configure {} with endpoint {}", peer.pubkey, endpoint.0);
                 Command::new("wg")
                     .args([
@@ -390,6 +389,20 @@ impl State {
                         &peer.pubkey,
                         "endpoint",
                         &endpoint.0.to_string(),
+                        "persistent-keepalive",
+                        "20",
+                        "allowed-ips",
+                        &format!("{}/32", peer.address),
+                    ])
+                    .output()?;
+            } else {
+                info!("Configure {} with no known endpoint", peer.pubkey);
+                Command::new("wg")
+                    .args([
+                        "set",
+                        &daemon.config.interface,
+                        "peer",
+                        &peer.pubkey,
                         "persistent-keepalive",
                         "20",
                         "allowed-ips",
