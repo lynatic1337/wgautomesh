@@ -83,7 +83,7 @@ fn fasthash(data: &[u8]) -> u64 {
     h.digest()
 }
 
-fn wg_dump(config: &Config) -> Result<(Pubkey, Vec<(Pubkey, Option<SocketAddr>, u64)>)> {
+fn wg_dump(config: &Config) -> Result<(Pubkey, u16, Vec<(Pubkey, Option<SocketAddr>, u64)>)> {
     let output = Command::new("sudo")
         .args(["wg", "show", &config.interface, "dump"])
         .output()?;
@@ -91,6 +91,7 @@ fn wg_dump(config: &Config) -> Result<(Pubkey, Vec<(Pubkey, Option<SocketAddr>, 
 
     let ourself = lines.next().unwrap().split('\t').collect::<Vec<_>>();
     let our_pubkey = ourself[1].to_string();
+    let listen_port = ourself[2].parse::<u16>()?;
 
     let peers = lines
         .filter_map(|line| {
@@ -107,14 +108,15 @@ fn wg_dump(config: &Config) -> Result<(Pubkey, Vec<(Pubkey, Option<SocketAddr>, 
         })
         .collect::<Vec<_>>();
 
-    Ok((our_pubkey, peers))
+    Ok((our_pubkey, listen_port, peers))
 }
 
 // ============ DAEMON CODE =================
 
 struct Daemon {
     config: Config,
-    ourself: Pubkey,
+    our_pubkey: Pubkey,
+    listen_port: u16,
     socket: UdpSocket,
     state: Mutex<State>,
 }
@@ -137,11 +139,12 @@ enum Gossip {
 
 impl Daemon {
     fn new(config: Config) -> Result<Self> {
-        let (ourself, _peers) = wg_dump(&config)?;
+        let (our_pubkey, listen_port, _peers) = wg_dump(&config)?;
         let socket = UdpSocket::bind(SocketAddr::new("0.0.0.0".parse()?, config.gossip_port))?;
         Ok(Daemon {
             config,
-            ourself,
+            our_pubkey,
+            listen_port,
             socket,
             state: Mutex::new(State {
                 peers: HashMap::new(),
@@ -176,7 +179,7 @@ impl Daemon {
     }
 
     fn wg_loop_iter(&self, i: usize) -> Result<()> {
-        let (_, wg_peers) = wg_dump(&self.config)?;
+        let (_, _, wg_peers) = wg_dump(&self.config)?;
         let mut state = self.state.lock().unwrap();
 
         // 1. Update local peers info of peers
@@ -191,7 +194,7 @@ impl Daemon {
                         Some(x) => x.address,
                         None => continue,
                     };
-                    let gossip_prio = fasthash(format!("{}-{}", self.ourself, pk).as_bytes());
+                    let gossip_prio = fasthash(format!("{}-{}", self.our_pubkey, pk).as_bytes());
                     state.peers.insert(
                         pk,
                         PeerInfo {
@@ -258,6 +261,8 @@ impl Daemon {
                         &endpoint.0.to_string(),
                         "persistent-keepalive",
                         "20",
+                        "allowed-ips",
+                        &format!("{}/32", peer.address),
                     ])
                     .output()?;
             }
