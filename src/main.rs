@@ -588,8 +588,14 @@ impl State {
             };
 
             if !endpoints.is_empty() {
-                let endpoint = endpoints[i % endpoints.len()];
-                info!("Configure {} with endpoint {}", peer_cfg.pubkey, endpoint.0);
+                let endpoint = endpoints[i % endpoints.len()].0;
+
+                if self.peers.get(&peer_cfg.pubkey).map(|x| x.endpoint == Some(endpoint)).unwrap_or(false) {
+                    // Skip if we are already using that endpoint
+                    continue;
+                }
+
+                info!("Configure {} with endpoint {}", peer_cfg.pubkey, endpoint);
                 Command::new("wg")
                     .args([
                         "set",
@@ -597,7 +603,7 @@ impl State {
                         "peer",
                         &peer_cfg.pubkey,
                         "endpoint",
-                        &endpoint.0.to_string(),
+                        &endpoint.to_string(),
                         "persistent-keepalive",
                         "10",
                         "allowed-ips",
