@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::net::{IpAddr, SocketAddr, UdpSocket};
+use std::net::{IpAddr, SocketAddr, UdpSocket, ToSocketAddrs};
 use std::process::Command;
 use std::sync::Mutex;
 use std::thread;
@@ -14,8 +14,8 @@ const KEEP_MAX_ADDRESSES: usize = 5;
 /// Number of peers to gossip with
 const GOSSIP_PEERS: usize = 10;
 
-/// Interval at which to try new addresses when disconnected (1 minute)
-const TRY_INTERVAL: Duration = Duration::from_secs(60);
+/// Interval at which to try new addresses when disconnected
+const TRY_INTERVAL: Duration = Duration::from_secs(30);
 /// Time before a peer is considered dead (5 minutes)
 const TIMEOUT: Duration = Duration::from_secs(300);
 /// Interval at which to gossip last_seen info
@@ -41,7 +41,7 @@ struct Peer {
     /// The peer's Wireguard address
     address: IpAddr,
     /// An optionnal Wireguard endpoint used to initialize a connection to this peer
-    endpoint: Option<SocketAddr>,
+    endpoint: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -363,22 +363,42 @@ impl State {
     fn setup_wg_peers(&self, daemon: &Daemon, i: usize) -> Result<()> {
         let now = time();
         for peer in daemon.config.peers.iter() {
-            // Skip peer if it is in connected state
+            // Skip ourself
+            if peer.pubkey == daemon.our_pubkey {
+                continue;
+            }
+            // If peer is connected, use higher keepalive and then skip reconfiguring it
             if self
                 .peers
                 .get(&peer.pubkey)
                 .map(|x| now < x.last_seen + TIMEOUT.as_secs())
                 .unwrap_or(false)
             {
+                Command::new("wg")
+                    .args([
+                        "set",
+                        &daemon.config.interface,
+                        "peer",
+                        &peer.pubkey,
+                        "persistent-keepalive",
+                        "30",
+                    ])
+                    .output()?;
                 continue;
             }
+
+            // For disconnected peers, cycle through the IP addresses that we know of
             let mut endpoints = self.gossip.get(&peer.pubkey).cloned().unwrap_or_default();
-            if endpoints.is_empty() {
-                if let Some(endpoint) = peer.endpoint {
-                    endpoints.push((endpoint, 0));
+            if let Some(endpoint) = &peer.endpoint {
+                match endpoint.to_socket_addrs() {
+                    Err(e) => error!("Could not resolve DNS for {}: {}", endpoint, e),
+                    Ok(iter) => for addr in iter {
+                        endpoints.push((addr, 0));
+                    }
                 }
             }
             endpoints.sort();
+
             if !endpoints.is_empty() {
                 let endpoint = endpoints[i % endpoints.len()];
                 info!("Configure {} with endpoint {}", peer.pubkey, endpoint.0);
@@ -391,7 +411,7 @@ impl State {
                         "endpoint",
                         &endpoint.0.to_string(),
                         "persistent-keepalive",
-                        "20",
+                        "10",
                         "allowed-ips",
                         &format!("{}/32", peer.address),
                     ])
@@ -404,8 +424,6 @@ impl State {
                         &daemon.config.interface,
                         "peer",
                         &peer.pubkey,
-                        "persistent-keepalive",
-                        "20",
                         "allowed-ips",
                         &format!("{}/32", peer.address),
                     ])
