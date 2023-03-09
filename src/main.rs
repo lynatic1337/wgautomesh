@@ -141,11 +141,14 @@ struct Daemon {
 }
 
 struct PeerInfo {
-    endpoint: Option<SocketAddr>,
-    lan_endpoint: Option<(SocketAddr, u64)>,
-    last_seen: u64,
+    // Info known from config
     gossip_ip: IpAddr,
     gossip_prio: u64,
+    // Info retrieved from wireguard
+    endpoint: Option<SocketAddr>,
+    last_seen: u64,
+    // Info received by LAN broadcast
+    lan_endpoint: Option<(SocketAddr, u64)>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -158,7 +161,7 @@ enum Gossip {
     LanBroadcast {
         pubkey: Pubkey,
         listen_port: u16,
-    }
+    },
 }
 
 impl Daemon {
@@ -267,10 +270,14 @@ impl Daemon {
                     self.socket.send_to(&packet, from)?;
                 }
             }
-            Gossip::LanBroadcast{ pubkey, listen_port } => {
+            Gossip::LanBroadcast {
+                pubkey,
+                listen_port,
+            } => {
                 if self.config.lan_discovery {
                     if let Some(peer) = state.peers.get_mut(&pubkey) {
-                        peer.lan_endpoint = Some((SocketAddr::new(from.ip(), listen_port), time()));
+                        let addr = SocketAddr::new(from.ip(), listen_port);
+                        peer.lan_endpoint = Some((addr, time()));
                     }
                 }
             }
@@ -464,43 +471,59 @@ impl State {
         Ok(())
     }
 
-    fn setup_wg_peers(&self, daemon: &Daemon, i: usize) -> Result<()> {
+    fn setup_wg_peers(&mut self, daemon: &Daemon, i: usize) -> Result<()> {
         let now = time();
-        for peer in daemon.config.peers.iter() {
+        for peer_cfg in daemon.config.peers.iter() {
             // Skip ourself
-            if peer.pubkey == daemon.our_pubkey {
-                continue;
-            }
-            // If peer is connected, use higher keepalive and then skip reconfiguring it
-            if self
-                .peers
-                .get(&peer.pubkey)
-                .map(|x| now < x.last_seen + TIMEOUT.as_secs())
-                .unwrap_or(false)
-            {
-                Command::new("wg")
-                    .args([
-                        "set",
-                        &daemon.config.interface,
-                        "peer",
-                        &peer.pubkey,
-                        "persistent-keepalive",
-                        "30",
-                    ])
-                    .output()?;
+            if peer_cfg.pubkey == daemon.our_pubkey {
                 continue;
             }
 
-            // For disconnected peers, cycle through the IP addresses that we know of
-            let lan_endpoint = self.peers.get(&peer.pubkey)
-                .and_then(|peer| peer.lan_endpoint)
-                .filter(|(_, t)| time() < t + TIMEOUT.as_secs());
+            if let Some(peer) = self.peers.get_mut(&peer_cfg.pubkey) {
+                // remove LAN endpoint info if it is obsolete
+                if matches!(peer.lan_endpoint, Some((_, t)) if now > t + TIMEOUT.as_secs()) {
+                    peer.lan_endpoint = None;
+                }
+
+                // make sure we aren't skipping this peer (see below) if we can switch to LAN
+                // endpoint instead of currently connected one
+                let bad_endpoint = match (&peer.lan_endpoint, &peer.endpoint) {
+                    (Some((addr1, _)), Some(addr2)) => addr1 != addr2,
+                    _ => false,
+                };
+
+                // if peer is connected and endpoint is the correct one,
+                // set higher keepalive and then skip reconfiguring it
+                if !bad_endpoint && now < peer.last_seen + TIMEOUT.as_secs() {
+                    Command::new("wg")
+                        .args([
+                            "set",
+                            &daemon.config.interface,
+                            "peer",
+                            &peer_cfg.pubkey,
+                            "persistent-keepalive",
+                            "30",
+                        ])
+                        .output()?;
+                    continue;
+                }
+            }
+
+            // For disconnected peers, cycle through the endpoint addresses that we know of
+            let lan_endpoint = self
+                .peers
+                .get(&peer_cfg.pubkey)
+                .and_then(|peer| peer.lan_endpoint);
 
             let endpoints = match lan_endpoint {
                 Some(endpoint) => vec![endpoint],
                 None => {
-                    let mut endpoints = self.gossip.get(&peer.pubkey).cloned().unwrap_or_default();
-                    if let Some(endpoint) = &peer.endpoint {
+                    let mut endpoints = self
+                        .gossip
+                        .get(&peer_cfg.pubkey)
+                        .cloned()
+                        .unwrap_or_default();
+                    if let Some(endpoint) = &peer_cfg.endpoint {
                         match endpoint.to_socket_addrs() {
                             Err(e) => error!("Could not resolve DNS for {}: {}", endpoint, e),
                             Ok(iter) => {
@@ -517,31 +540,31 @@ impl State {
 
             if !endpoints.is_empty() {
                 let endpoint = endpoints[i % endpoints.len()];
-                info!("Configure {} with endpoint {}", peer.pubkey, endpoint.0);
+                info!("Configure {} with endpoint {}", peer_cfg.pubkey, endpoint.0);
                 Command::new("wg")
                     .args([
                         "set",
                         &daemon.config.interface,
                         "peer",
-                        &peer.pubkey,
+                        &peer_cfg.pubkey,
                         "endpoint",
                         &endpoint.0.to_string(),
                         "persistent-keepalive",
                         "10",
                         "allowed-ips",
-                        &format!("{}/32", peer.address),
+                        &format!("{}/32", peer_cfg.address),
                     ])
                     .output()?;
             } else {
-                info!("Configure {} with no known endpoint", peer.pubkey);
+                info!("Configure {} with no known endpoint", peer_cfg.pubkey);
                 Command::new("wg")
                     .args([
                         "set",
                         &daemon.config.interface,
                         "peer",
-                        &peer.pubkey,
+                        &peer_cfg.pubkey,
                         "allowed-ips",
-                        &format!("{}/32", peer.address),
+                        &format!("{}/32", peer_cfg.address),
                     ])
                     .output()?;
             }
