@@ -226,7 +226,7 @@ impl Daemon {
         let mut i = 0;
         loop {
             if let Err(e) = self.wg_loop_iter(i) {
-                error!("Wg loop error: {}", e);
+                error!("Wireguard configuration loop error: {}", e);
             }
             i = i + 1;
             std::thread::sleep(TRY_INTERVAL);
@@ -324,7 +324,7 @@ impl Daemon {
             .map_err(|e| anyhow!("decrypt error: {}", e))?;
 
         let gossip = bincode::deserialize(&plaintext)?;
-        debug!("RECV {}\t{:?}", src, gossip);
+        trace!("RECV {}\t{:?}", src, gossip);
         Ok((src, gossip))
     }
 
@@ -436,7 +436,7 @@ impl State {
 
         for (gossip_ip, _) in peer_vec.into_iter().take(GOSSIP_PEERS) {
             let addr = SocketAddr::new(gossip_ip, daemon.config.gossip_port);
-            debug!("SEND {}\t{:?}", addr, gossip);
+            trace!("SEND {}\t{:?}", addr, gossip);
             daemon.socket.send_to(&packet, addr)?;
         }
 
@@ -483,7 +483,7 @@ impl State {
             }
         };
         if let Some(propagate) = propagate {
-            info!("Propagating announce: {:?}", propagate);
+            debug!("Propagating announce: {:?}", propagate);
             self.send_gossip(daemon, propagate)?;
         }
         Ok(())
