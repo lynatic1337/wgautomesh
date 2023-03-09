@@ -1,11 +1,11 @@
 use std::collections::HashMap;
-use std::net::{IpAddr, SocketAddr, UdpSocket, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr, SocketAddrV4, ToSocketAddrs, UdpSocket};
 use std::process::Command;
 use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
 
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use log::*;
 use serde::{Deserialize, Serialize};
 
@@ -21,12 +21,17 @@ const TIMEOUT: Duration = Duration::from_secs(300);
 /// Interval at which to gossip last_seen info
 const GOSSIP_INTERVAL: Duration = Duration::from_secs(300);
 
+const IGD_INTERVAL: Duration = Duration::from_secs(60);
+const IGD_LEASE_DURATION: Duration = Duration::from_secs(300);
+
 type Pubkey = String;
 
 #[derive(Deserialize)]
 struct Config {
     /// The Wireguard interface name
     interface: Pubkey,
+    /// Forward an external port to Wiregard using UPnP IGD
+    upnp_forward_external_port: Option<u16>,
     /// The port to use for gossip inside the Wireguard mesh (must be the same on all nodes)
     gossip_port: u16,
     /// The list of peers we try to connect to
@@ -175,6 +180,7 @@ impl Daemon {
         thread::scope(|s| {
             s.spawn(|| self.wg_loop());
             s.spawn(|| self.recv_loop());
+            s.spawn(|| self.igd_loop());
         });
         unreachable!()
     }
@@ -285,6 +291,54 @@ impl Daemon {
         debug!("RECV {}\t{:?}", src, gossip);
         Ok((src, gossip))
     }
+
+    fn igd_loop(&self) {
+        if let Some(external_port) = self.config.upnp_forward_external_port {
+            loop {
+                if let Err(e) = self.igd_loop_iter(external_port) {
+                    error!("IGD loop error: {}", e);
+                }
+                std::thread::sleep(IGD_INTERVAL);
+            }
+        }
+    }
+
+    fn igd_loop_iter(&self, external_port: u16) -> Result<()> {
+        let gateway = igd::search_gateway(Default::default())?;
+
+        let gwa = gateway.addr.ip().octets();
+        let cmplen = match gwa {
+            [192, 168, _, _] => 3,
+            [10, _, _, _] => 2,
+            _ => bail!(
+                "Gateway IP does not appear to be in a local network ({})",
+                gateway.addr.ip()
+            ),
+        };
+        let private_ip = get_if_addrs::get_if_addrs()?
+            .into_iter()
+            .map(|i| i.addr.ip())
+            .filter_map(|a| match a {
+                std::net::IpAddr::V4(a4) if a4.octets()[..cmplen] == gwa[..cmplen] => Some(a4),
+                _ => None,
+            })
+            .next()
+            .ok_or(anyhow!("No interface has an IP on same subnet as gateway"))?;
+        info!(
+            "IGD: gateway is {}, private IP is {}, making announce",
+            gateway.addr, private_ip
+        );
+
+        gateway.add_port(
+            igd::PortMappingProtocol::UDP,
+            external_port,
+            SocketAddrV4::new(private_ip, self.listen_port),
+            IGD_LEASE_DURATION.as_secs() as u32,
+            "Wireguard via wgautomesh",
+        )?;
+
+        Ok(())
+    }
 }
 
 struct State {
@@ -392,8 +446,10 @@ impl State {
             if let Some(endpoint) = &peer.endpoint {
                 match endpoint.to_socket_addrs() {
                     Err(e) => error!("Could not resolve DNS for {}: {}", endpoint, e),
-                    Ok(iter) => for addr in iter {
-                        endpoints.push((addr, 0));
+                    Ok(iter) => {
+                        for addr in iter {
+                            endpoints.push((addr, 0));
+                        }
                     }
                 }
             }
