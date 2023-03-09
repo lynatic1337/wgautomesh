@@ -21,6 +21,8 @@ const TIMEOUT: Duration = Duration::from_secs(300);
 /// Interval at which to gossip last_seen info
 const GOSSIP_INTERVAL: Duration = Duration::from_secs(300);
 
+const PERSIST_INTERVAL: Duration = Duration::from_secs(600);
+
 const LAN_BROADCAST_INTERVAL: Duration = Duration::from_secs(60);
 
 const IGD_INTERVAL: Duration = Duration::from_secs(60);
@@ -37,6 +39,8 @@ struct Config {
     /// The secret to use to authenticate nodes between them
     gossip_secret: Option<String>,
     gossip_secret_file: Option<String>,
+    /// The file where to persist known peer addresses
+    persist_file: Option<String>,
 
     /// Enable LAN discovery
     #[serde(default)]
@@ -187,6 +191,14 @@ impl Daemon {
         let (our_pubkey, listen_port, _peers) = wg_dump(&config)?;
         let socket = UdpSocket::bind(SocketAddr::new("0.0.0.0".parse()?, config.gossip_port))?;
         socket.set_broadcast(true)?;
+
+        let gossip = config
+            .persist_file
+            .as_ref()
+            .and_then(|x| std::fs::read(x).ok())
+            .and_then(|x| bincode::deserialize(&x).ok())
+            .unwrap_or_default();
+
         Ok(Daemon {
             config,
             gossip_key,
@@ -195,7 +207,7 @@ impl Daemon {
             socket,
             state: Mutex::new(State {
                 peers: HashMap::new(),
-                gossip: HashMap::new(),
+                gossip,
             }),
         })
     }
@@ -216,6 +228,7 @@ impl Daemon {
         thread::scope(|s| {
             s.spawn(|| self.wg_loop());
             s.spawn(|| self.recv_loop());
+            s.spawn(|| self.persist_loop());
             s.spawn(|| self.lan_broadcast_loop());
             s.spawn(|| self.igd_loop());
         });
@@ -333,6 +346,23 @@ impl Daemon {
         let gossip = bincode::deserialize(&plaintext)?;
         trace!("RECV {}\t{:?}", src, gossip);
         Ok((src, gossip))
+    }
+
+    fn persist_loop(&self) {
+        if let Some(file) = &self.config.persist_file {
+            loop {
+                if let Err(e) = self.persist_state(file) {
+                    error!("Could not write persistent state to disk: {}", e);
+                }
+                std::thread::sleep(PERSIST_INTERVAL);
+            }
+        }
+    }
+
+    fn persist_state(&self, file: &str) -> Result<()> {
+        let data = bincode::serialize(&self.state.lock().unwrap().gossip)?;
+        std::fs::write(file, &data)?;
+        Ok(())
     }
 
     fn lan_broadcast_loop(&self) {
@@ -603,7 +633,12 @@ impl State {
             if !endpoints.is_empty() {
                 let endpoint = endpoints[i % endpoints.len()].0;
 
-                if self.peers.get(&peer_cfg.pubkey).map(|x| x.endpoint == Some(endpoint)).unwrap_or(false) {
+                if self
+                    .peers
+                    .get(&peer_cfg.pubkey)
+                    .map(|x| x.endpoint == Some(endpoint))
+                    .unwrap_or(false)
+                {
                     // Skip if we are already using that endpoint
                     continue;
                 }
