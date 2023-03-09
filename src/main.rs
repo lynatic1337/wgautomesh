@@ -90,6 +90,12 @@ fn wg_dump(config: &Config) -> Result<(Pubkey, u16, Vec<(Pubkey, Option<SocketAd
     let mut lines = std::str::from_utf8(&output.stdout)?.split('\n');
 
     let ourself = lines.next().unwrap().split('\t').collect::<Vec<_>>();
+    if ourself.len() < 3 {
+        bail!(
+            "Unable to fetch wireguard status for interface {}",
+            config.interface
+        );
+    }
     let our_pubkey = ourself[1].to_string();
     let listen_port = ourself[2].parse::<u16>()?;
 
