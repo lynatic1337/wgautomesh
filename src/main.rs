@@ -211,7 +211,7 @@ impl Daemon {
         }
 
         if let Err(e) = self.load_persisted_data() {
-            error!("Error while loading/reannouncing persisted data: {}", e);
+            warn!("Error while loading/reannouncing persisted data: {}", e);
         }
 
         let request = self.make_packet(&Gossip::Request)?;
