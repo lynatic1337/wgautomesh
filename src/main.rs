@@ -34,6 +34,9 @@ struct Config {
     interface: Pubkey,
     /// The port to use for gossip inside the Wireguard mesh (must be the same on all nodes)
     gossip_port: u16,
+    /// The secret to use to authenticate nodes between them
+    gossip_secret: Option<String>,
+    gossip_secret_file: Option<String>,
 
     /// Enable LAN discovery
     #[serde(default)]
@@ -71,10 +74,17 @@ fn main() -> Result<()> {
         ),
     };
 
-    let config: Config = {
+    let mut config: Config = {
         let config_str = std::fs::read_to_string(config_path)?;
         toml::from_str(&config_str)?
     };
+
+    if let Some(f) = &config.gossip_secret_file {
+        if config.gossip_secret.is_some() {
+            bail!("both gossip_secret and gossip_secret_file are given in config file");
+        }
+        config.gossip_secret = Some(std::fs::read_to_string(f)?);
+    }
 
     Daemon::new(config)?.run()
 }
@@ -94,6 +104,11 @@ fn fasthash(data: &[u8]) -> u64 {
     let mut h = Xxh3::new();
     h.update(data);
     h.digest()
+}
+
+fn kdf(secret: &str) -> xsalsa20poly1305::Key {
+    let hash = blake3::hash(format!("wgautomesh: {}", secret).as_bytes());
+    hash.as_bytes().clone().into()
 }
 
 fn wg_dump(config: &Config) -> Result<(Pubkey, u16, Vec<(Pubkey, Option<SocketAddr>, u64)>)> {
@@ -134,6 +149,7 @@ fn wg_dump(config: &Config) -> Result<(Pubkey, u16, Vec<(Pubkey, Option<SocketAd
 
 struct Daemon {
     config: Config,
+    gossip_key: xsalsa20poly1305::Key,
     our_pubkey: Pubkey,
     listen_port: u16,
     socket: UdpSocket,
@@ -166,11 +182,14 @@ enum Gossip {
 
 impl Daemon {
     fn new(config: Config) -> Result<Self> {
+        let gossip_key = kdf(config.gossip_secret.as_deref().unwrap_or_default());
+
         let (our_pubkey, listen_port, _peers) = wg_dump(&config)?;
         let socket = UdpSocket::bind(SocketAddr::new("0.0.0.0".parse()?, config.gossip_port))?;
         socket.set_broadcast(true)?;
         Ok(Daemon {
             config,
+            gossip_key,
             our_pubkey,
             listen_port,
             socket,
@@ -186,7 +205,7 @@ impl Daemon {
             error!("Error initializing wireguard peers: {}", e);
         }
 
-        let request = bincode::serialize(&Gossip::Request)?;
+        let request = self.make_packet(&Gossip::Request)?;
         for peer in self.config.peers.iter() {
             let addr = SocketAddr::new(peer.address, self.config.gossip_port);
             if let Err(e) = self.socket.send_to(&request, addr) {
@@ -264,7 +283,7 @@ impl Daemon {
             }
             Gossip::Request => {
                 for (pubkey, endpoints) in state.gossip.iter() {
-                    let packet = bincode::serialize(&Gossip::Announce {
+                    let packet = self.make_packet(&Gossip::Announce {
                         pubkey: pubkey.clone(),
                         endpoints: endpoints.clone(),
                     })?;
@@ -287,12 +306,24 @@ impl Daemon {
     }
 
     fn recv_gossip(&self) -> Result<(SocketAddr, Gossip)> {
+        use xsalsa20poly1305::{
+            aead::{Aead, KeyInit},
+            XSalsa20Poly1305, NONCE_SIZE,
+        };
+
         let mut buf = vec![0u8; 1500];
         let (amt, src) = self.socket.recv_from(&mut buf)?;
-        if !self.config.peers.iter().any(|x| x.address == src.ip()) {
-            bail!("Received message from unexpected peer: {}", src);
+
+        if amt < NONCE_SIZE {
+            bail!("invalid packet");
         }
-        let gossip = bincode::deserialize(&buf[..amt])?;
+
+        let cipher = XSalsa20Poly1305::new(&self.gossip_key);
+        let plaintext = cipher
+            .decrypt(buf[..NONCE_SIZE].try_into().unwrap(), &buf[NONCE_SIZE..amt])
+            .map_err(|e| anyhow!("decrypt error: {}", e))?;
+
+        let gossip = bincode::deserialize(&plaintext)?;
         debug!("RECV {}\t{:?}", src, gossip);
         Ok((src, gossip))
     }
@@ -309,7 +340,7 @@ impl Daemon {
     }
 
     fn lan_broadcast_iter(&self) -> Result<()> {
-        let packet = bincode::serialize(&Gossip::LanBroadcast {
+        let packet = self.make_packet(&Gossip::LanBroadcast {
             pubkey: self.our_pubkey.clone(),
             listen_port: self.listen_port,
         })?;
@@ -365,6 +396,23 @@ impl Daemon {
 
         Ok(())
     }
+
+    fn make_packet(&self, gossip: &Gossip) -> Result<Vec<u8>> {
+        use xsalsa20poly1305::{
+            aead::{Aead, KeyInit, OsRng},
+            XSalsa20Poly1305,
+        };
+
+        let plaintext = bincode::serialize(&gossip)?;
+
+        let cipher = XSalsa20Poly1305::new(&self.gossip_key);
+        let nonce = XSalsa20Poly1305::generate_nonce(&mut OsRng);
+        let ciphertext = cipher
+            .encrypt(&nonce, &plaintext[..])
+            .map_err(|e| anyhow!("encrypt error: {}", e))?;
+
+        Ok([&nonce[..], &ciphertext[..]].concat())
+    }
 }
 
 struct State {
@@ -374,7 +422,7 @@ struct State {
 
 impl State {
     fn send_gossip(&self, daemon: &Daemon, gossip: Gossip) -> Result<()> {
-        let packet = bincode::serialize(&gossip)?;
+        let packet = daemon.make_packet(&gossip)?;
 
         let now = time();
 
