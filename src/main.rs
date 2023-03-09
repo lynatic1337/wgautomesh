@@ -232,12 +232,12 @@ impl Daemon {
             .iter()
             .filter_map(|(pk, info)| info.endpoint.map(|ip| (pk, ip, info.last_seen)))
             .filter(|(pk, ip, last_seen)| {
-                !state
+                state
                     .gossip
                     .get(pk.as_str())
                     .unwrap_or(&vec![])
                     .iter()
-                    .any(|(a, t)| a == ip && *last_seen > t + GOSSIP_INTERVAL.as_secs())
+                    .all(|(a, t)| a != ip || *last_seen > t + GOSSIP_INTERVAL.as_secs())
             })
             .map(|(pk, ip, last_seen)| (pk.to_string(), vec![(ip, last_seen)]))
             .collect::<Vec<_>>();
@@ -380,9 +380,9 @@ impl State {
                 Some(existing) => {
                     let mut has_new = false;
                     for (new_addr, new_t) in endpoints {
-                        if !existing
+                        if existing
                             .iter()
-                            .any(|(addr, t)| *addr == new_addr && *t >= new_t)
+                            .all(|(addr, t)| *addr != new_addr || *t < new_t)
                         {
                             existing.retain(|(addr, _)| *addr != new_addr);
                             existing.push((new_addr, new_t));
@@ -390,7 +390,7 @@ impl State {
                         }
                     }
                     if has_new {
-                        existing.sort_by_key(|(_, t)| *t);
+                        existing.sort_by_key(|(_, t)| -(*t as i64));
                         existing.truncate(KEEP_MAX_ADDRESSES);
                         Some(Gossip::Announce {
                             pubkey,
