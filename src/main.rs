@@ -160,10 +160,16 @@ impl Daemon {
     }
 
     fn run(&self) -> Result<()> {
+        if let Err(e) = self.state.lock().unwrap().setup_wg_peers(self, 0) {
+            error!("Error initializing wireguard peers: {}", e);
+        }
+
         let request = bincode::serialize(&Gossip::Request)?;
         for peer in self.config.peers.iter() {
             let addr = SocketAddr::new(peer.address, self.config.gossip_port);
-            self.socket.send_to(&request, addr)?;
+            if let Err(e) = self.socket.send_to(&request, addr) {
+                error!("Error sending initial request to {}: {}", addr, e);
+            }
         }
 
         thread::scope(|s| {
@@ -235,43 +241,7 @@ impl Daemon {
         }
 
         // 3. Try new address for disconnected peers
-        let now = time();
-        for peer in self.config.peers.iter() {
-            // Skip peer if it is in connected state
-            if state
-                .peers
-                .get(&peer.pubkey)
-                .map(|x| now < x.last_seen + TIMEOUT.as_secs())
-                .unwrap_or(false)
-            {
-                continue;
-            }
-            let mut endpoints = state.gossip.get(&peer.pubkey).cloned().unwrap_or_default();
-            if endpoints.is_empty() {
-                if let Some(endpoint) = peer.endpoint {
-                    endpoints.push((endpoint, 0));
-                }
-            }
-            endpoints.sort();
-            if !endpoints.is_empty() {
-                let endpoint = endpoints[i % endpoints.len()];
-                info!("Configure {} with endpoint {}", peer.pubkey, endpoint.0);
-                Command::new("wg")
-                    .args([
-                        "set",
-                        &self.config.interface,
-                        "peer",
-                        &peer.pubkey,
-                        "endpoint",
-                        &endpoint.0.to_string(),
-                        "persistent-keepalive",
-                        "20",
-                        "allowed-ips",
-                        &format!("{}/32", peer.address),
-                    ])
-                    .output()?;
-            }
-        }
+        state.setup_wg_peers(&self, i)?;
 
         Ok(())
     }
@@ -386,6 +356,47 @@ impl State {
         if let Some(propagate) = propagate {
             info!("Propagating announce: {:?}", propagate);
             self.send_gossip(daemon, propagate)?;
+        }
+        Ok(())
+    }
+
+    fn setup_wg_peers(&self, daemon: &Daemon, i: usize) -> Result<()> {
+        let now = time();
+        for peer in daemon.config.peers.iter() {
+            // Skip peer if it is in connected state
+            if self
+                .peers
+                .get(&peer.pubkey)
+                .map(|x| now < x.last_seen + TIMEOUT.as_secs())
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            let mut endpoints = self.gossip.get(&peer.pubkey).cloned().unwrap_or_default();
+            if endpoints.is_empty() {
+                if let Some(endpoint) = peer.endpoint {
+                    endpoints.push((endpoint, 0));
+                }
+            }
+            endpoints.sort();
+            if !endpoints.is_empty() {
+                let endpoint = endpoints[i % endpoints.len()];
+                info!("Configure {} with endpoint {}", peer.pubkey, endpoint.0);
+                Command::new("wg")
+                    .args([
+                        "set",
+                        &daemon.config.interface,
+                        "peer",
+                        &peer.pubkey,
+                        "endpoint",
+                        &endpoint.0.to_string(),
+                        "persistent-keepalive",
+                        "20",
+                        "allowed-ips",
+                        &format!("{}/32", peer.address),
+                    ])
+                    .output()?;
+            }
         }
         Ok(())
     }
