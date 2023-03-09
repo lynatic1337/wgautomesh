@@ -201,8 +201,8 @@ impl Daemon {
     }
 
     fn run(&self) -> Result<()> {
-        if let Err(e) = self.state.lock().unwrap().setup_wg_peers(self, 0) {
-            error!("Error initializing wireguard peers: {}", e);
+        if let Err(e) = self.initialize() {
+            error!("Error while initializing Wireguard configuration: {}", e);
         }
 
         let request = self.make_packet(&Gossip::Request)?;
@@ -220,6 +220,13 @@ impl Daemon {
             s.spawn(|| self.igd_loop());
         });
         unreachable!()
+    }
+
+    fn initialize(&self) -> Result<()> {
+        let mut state = self.state.lock().unwrap();
+        state.read_wg_peers(self)?;
+        state.setup_wg_peers(self, 0)?;
+        Ok(())
     }
 
     fn wg_loop(&self) -> ! {
