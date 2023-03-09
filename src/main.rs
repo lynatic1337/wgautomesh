@@ -192,13 +192,6 @@ impl Daemon {
         let socket = UdpSocket::bind(SocketAddr::new("0.0.0.0".parse()?, config.gossip_port))?;
         socket.set_broadcast(true)?;
 
-        let gossip = config
-            .persist_file
-            .as_ref()
-            .and_then(|x| std::fs::read(x).ok())
-            .and_then(|x| bincode::deserialize(&x).ok())
-            .unwrap_or_default();
-
         Ok(Daemon {
             config,
             gossip_key,
@@ -207,7 +200,7 @@ impl Daemon {
             socket,
             state: Mutex::new(State {
                 peers: HashMap::new(),
-                gossip,
+                gossip: HashMap::new(),
             }),
         })
     }
@@ -215,6 +208,10 @@ impl Daemon {
     fn run(&self) -> Result<()> {
         if let Err(e) = self.initialize() {
             error!("Error while initializing Wireguard configuration: {}", e);
+        }
+
+        if let Err(e) = self.load_persisted_data() {
+            error!("Error while loading/reannouncing persisted data: {}", e);
         }
 
         let request = self.make_packet(&Gossip::Request)?;
@@ -239,6 +236,17 @@ impl Daemon {
         let mut state = self.state.lock().unwrap();
         state.read_wg_peers(self)?;
         state.setup_wg_peers(self, 0)?;
+        Ok(())
+    }
+
+    fn load_persisted_data(&self) -> Result<()> {
+        if let Some(file) = &self.config.persist_file {
+            let mut state = self.state.lock().unwrap();
+            let persisted: HashMap<_, _> = bincode::deserialize(&std::fs::read(file)?)?;
+            for (pubkey, addrs) in persisted.into_iter() {
+                state.handle_announce(self, pubkey, addrs)?;
+            }
+        }
         Ok(())
     }
 
