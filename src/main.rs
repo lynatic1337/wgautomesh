@@ -168,6 +168,7 @@ impl Daemon {
     fn new(config: Config) -> Result<Self> {
         let (our_pubkey, listen_port, _peers) = wg_dump(&config)?;
         let socket = UdpSocket::bind(SocketAddr::new("0.0.0.0".parse()?, config.gossip_port))?;
+        socket.set_broadcast(true)?;
         Ok(Daemon {
             config,
             our_pubkey,
