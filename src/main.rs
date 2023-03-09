@@ -84,8 +84,8 @@ fn fasthash(data: &[u8]) -> u64 {
 }
 
 fn wg_dump(config: &Config) -> Result<(Pubkey, u16, Vec<(Pubkey, Option<SocketAddr>, u64)>)> {
-    let output = Command::new("sudo")
-        .args(["wg", "show", &config.interface, "dump"])
+    let output = Command::new("wg")
+        .args(["show", &config.interface, "dump"])
         .output()?;
     let mut lines = std::str::from_utf8(&output.stdout)?.split('\n');
 
@@ -256,9 +256,8 @@ impl Daemon {
             if !endpoints.is_empty() {
                 let endpoint = endpoints[i % endpoints.len()];
                 info!("Configure {} with endpoint {}", peer.pubkey, endpoint.0);
-                Command::new("sudo")
+                Command::new("wg")
                     .args([
-                        "wg",
                         "set",
                         &self.config.interface,
                         "peer",
