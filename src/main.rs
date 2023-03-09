@@ -379,7 +379,8 @@ impl State {
                 }
             }
             endpoints.sort();
-            if let Some(endpoint) = endpoints.get(i % endpoints.len()) {
+            if !endpoints.is_empty() {
+                let endpoint = endpoints[i % endpoints.len()];
                 info!("Configure {} with endpoint {}", peer.pubkey, endpoint.0);
                 Command::new("wg")
                     .args([
