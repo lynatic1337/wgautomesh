@@ -173,6 +173,8 @@ struct PeerInfo {
 
 #[derive(Serialize, Deserialize, Debug)]
 enum Gossip {
+    Ping,
+    Pong,
     Announce {
         pubkey: Pubkey,
         endpoints: Vec<(SocketAddr, u64)>,
@@ -329,6 +331,11 @@ impl Daemon {
                     }
                 }
             }
+            Gossip::Ping => {
+                let packet = self.make_packet(&Gossip::Pong)?;
+                self.socket.send_to(&packet, from)?;
+            }
+            Gossip::Pong => (),
         }
         Ok(())
     }
@@ -666,6 +673,11 @@ impl State {
                         &format!("{}/32", peer_cfg.address),
                     ])
                     .output()?;
+                let packet = daemon.make_packet(&Gossip::Ping)?;
+                daemon.socket.send_to(
+                    &packet,
+                    SocketAddr::new(peer_cfg.address, daemon.config.gossip_port),
+                )?;
             } else {
                 info!("Configure {} with no known endpoint", peer_cfg.pubkey);
                 Command::new("wg")
