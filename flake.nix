@@ -21,6 +21,13 @@
       let
         packageSet = pkgs.rustBuilder.makePackageSet ({
           inherit packageFun rustVersion;
+
+          # Config to build static binaries
+          target = "x86_64-unknown-linux-musl";
+          codegenOpts = {
+            "x86_64-unknown-linux-musl" =
+              [ "target-feature=+crt-static" "link-arg=-static-pie" ];
+          };
         } // args);
       in
         packageSet.workspace.wgautomesh {
