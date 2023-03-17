@@ -433,7 +433,7 @@ impl Daemon {
             })
             .next()
             .ok_or(anyhow!("No interface has an IP on same subnet as gateway"))?;
-        info!(
+        debug!(
             "IGD: gateway is {}, private IP is {}, making announce",
             gateway.addr, private_ip
         );
