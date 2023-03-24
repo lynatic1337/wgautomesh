@@ -26,3 +26,38 @@ it does not provide facilities for dynamically adding more peers like many wireg
 
 `wgautomesh` was built for Deuxfleurs to integrate with our automated NixOS-based configuration management system.
 A preliminary NixOS module for `wgautomesh` can be found [here](https://git.deuxfleurs.fr/Deuxfleurs/nixcfg/src/branch/wgautomesh/nix/wgautomesh.nix)
+
+### Sample configuration file
+
+```toml
+interface = "wg0"
+gossip_port = 1666
+lan_discovery = true
+gossip_secret_file = "/var/lib/wgautomesh/gossip_secret"
+persist_file = "/var/lib/wgautomesh/state"
+upnp_forward_external_port = 33723
+
+[[peers]]
+pubkey = "7Nm7pMmyS7Nts1MB+loyD8u84ODxHPTkDu+uqQR6yDk="
+address = "10.14.1.2"
+endpoint = "77.207.15.215:33722"
+
+[[peers]]
+pubkey = "lABn/axzD1jkFulX8c+K3B3CbKXORlIMDDoe8sQVxhs="
+address = "10.14.1.3"
+endpoint = "77.207.15.215:33723"
+
+[[peers]]
+pubkey = "XLOYoMXF+PO4jcgfSVAk+thh4VmWx0wzWnb0xs08G1s="
+address = "10.14.4.1"
+endpoint = "bitfrost.fiber.shirokumo.net:33734"
+
+[[peers]]
+pubkey = "smBQYUS60JDkNoqkTT7TgbpqFiM43005fcrT6472llI="
+address = "10.14.2.33"
+endpoint = "82.64.238.84:33733"
+
+[[peers]]
+pubkey = "m9rLf+233X1VColmeVrM/xfDGro5W6Gk5N0zqcf32WY="
+address = "10.14.3.1"
+```
