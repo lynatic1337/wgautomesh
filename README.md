@@ -30,12 +30,31 @@ A preliminary NixOS module for `wgautomesh` can be found [here](https://git.deux
 ### Sample configuration file
 
 ```toml
+# The Wireguard interface to control.
 interface = "wg0"
+
+# The port wgautomesh will use to communicate from node to node.  Wgautomesh
+# gossip communications occur inside the wireguard mesh network.
 gossip_port = 1666
+
+# Enable discovery of other wgautomesh nodes on the same LAN using UDP broadcast.
 lan_discovery = true
-gossip_secret_file = "/var/lib/wgautomesh/gossip_secret"
-persist_file = "/var/lib/wgautomesh/state"
+
+# Enables UPnP/IGD forwarding of an external port to the Wireguard listening port
+# on this node, for compatible routers/gateways.
 upnp_forward_external_port = 33723
+
+# The path to a file that contains the encryption secret wgautomesh uses to
+# communicate.  This secret can be any arbitrary utf-8 string.  The following
+# command can be used to generate a new secret:
+#     openssl rand -base64 32
+gossip_secret_file = "/var/lib/wgautomesh/gossip_secret"
+
+# The path to a file that wgautomesh can write to, to save the endpoint addresses
+# it successfully used to connect to other nodes in the mesh.  These addresses
+# are used in conjunction with the endpoint addresses specified below in the
+# `[[peers]]` section when trying to establish connectivity.
+persist_file = "/var/lib/wgautomesh/state"
 
 [[peers]]
 pubkey = "7Nm7pMmyS7Nts1MB+loyD8u84ODxHPTkDu+uqQR6yDk="
