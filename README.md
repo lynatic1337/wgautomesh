@@ -25,7 +25,9 @@ Remarks/limitations:
 it does not provide facilities for dynamically adding more peers like many wireguard configuration tools do.
 
 `wgautomesh` was built for Deuxfleurs to integrate with our automated NixOS-based configuration management system.
-A preliminary NixOS module for `wgautomesh` can be found [here](https://git.deuxfleurs.fr/Deuxfleurs/nixcfg/src/branch/wgautomesh/nix/wgautomesh.nix)
+`wgautomesh` is packaged in NixOS since version 23.05.
+Configuration options are listed [here](https://search.nixos.org/options?from=0&size=50&sort=relevance&query=wgautomesh)
+and closely mirror the structure of the configuration file described below.
 
 ### Sample configuration file
 
