@@ -1,5 +1,8 @@
+#![feature(ip)]
+mod igd;
+use igd::*;
 use std::collections::HashMap;
-use std::net::{IpAddr, SocketAddr, SocketAddrV4, ToSocketAddrs, UdpSocket};
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs, UdpSocket};
 use std::process::Command;
 use std::sync::Mutex;
 use std::thread;
@@ -26,8 +29,6 @@ const PERSIST_INTERVAL: Duration = Duration::from_secs(600);
 const LAN_BROADCAST_INTERVAL: Duration = Duration::from_secs(60);
 
 const IGD_INTERVAL: Duration = Duration::from_secs(60);
-const IGD_LEASE_DURATION: Duration = Duration::from_secs(300);
-
 type Pubkey = String;
 
 #[derive(Deserialize)]
@@ -41,6 +42,10 @@ struct Config {
     gossip_secret_file: Option<String>,
     /// The file where to persist known peer addresses
     persist_file: Option<String>,
+
+    /// Use IPv6 instead of IPv4
+    #[serde(default)]
+    ipv6: bool,
 
     /// Enable LAN discovery
     #[serde(default)]
@@ -61,7 +66,7 @@ struct Peer {
     /// The peer's Wireguard address
     address: IpAddr,
     /// An optionnal Wireguard endpoint used to initialize a connection to this peer
-    endpoint: Option<String>,
+    endpoint: Option<SocketAddr>,
 }
 
 fn main() -> Result<()> {
@@ -189,9 +194,13 @@ enum Gossip {
 impl Daemon {
     fn new(config: Config) -> Result<Self> {
         let gossip_key = kdf(config.gossip_secret.as_deref().unwrap_or_default());
-
         let (our_pubkey, listen_port, _peers) = wg_dump(&config)?;
-        let socket = UdpSocket::bind(SocketAddr::new("0.0.0.0".parse()?, config.gossip_port))?;
+        let bind_addr = if config.ipv6 {
+            SocketAddr::new("::".parse()?, config.gossip_port) // IPv6
+        } else {
+            SocketAddr::new("0.0.0.0".parse()?, config.gossip_port) // IPv4
+        };
+        let socket = UdpSocket::bind(bind_addr)?;
         socket.set_broadcast(true)?;
 
         Ok(Daemon {
@@ -396,57 +405,27 @@ impl Daemon {
             pubkey: self.our_pubkey.clone(),
             listen_port: self.listen_port,
         })?;
-        let addr = SocketAddr::new("255.255.255.255".parse().unwrap(), self.config.gossip_port);
+        let addr = if self.config.ipv6 {
+            SocketAddr::new("ff05::1".parse().unwrap(), self.config.gossip_port)
+        } else {
+            SocketAddr::new("255.255.255.255".parse().unwrap(), self.config.gossip_port)
+        };
         self.socket.send_to(&packet, addr)?;
         Ok(())
     }
 
     fn igd_loop(&self) {
         if let Some(external_port) = self.config.upnp_forward_external_port {
-            loop {
-                if let Err(e) = self.igd_loop_iter(external_port) {
-                    error!("IGD loop error: {}", e);
+            let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
+            rt.block_on(async {
+                loop {
+                    if let Err(e) = igd_loop_iter(self.listen_port,external_port, self.config.ipv6).await {
+                        error!("IGD loop error: {}", e);
+                    }
+                    tokio::time::sleep(IGD_INTERVAL).await;
                 }
-                std::thread::sleep(IGD_INTERVAL);
-            }
+            });
         }
-    }
-
-    fn igd_loop_iter(&self, external_port: u16) -> Result<()> {
-        let gateway = igd::search_gateway(Default::default())?;
-
-        let gwa = gateway.addr.ip().octets();
-        let cmplen = match gwa {
-            [192, 168, _, _] => 3,
-            [10, _, _, _] => 2,
-            _ => bail!(
-                "Gateway IP does not appear to be in a local network ({})",
-                gateway.addr.ip()
-            ),
-        };
-        let private_ip = get_if_addrs::get_if_addrs()?
-            .into_iter()
-            .map(|i| i.addr.ip())
-            .filter_map(|a| match a {
-                std::net::IpAddr::V4(a4) if a4.octets()[..cmplen] == gwa[..cmplen] => Some(a4),
-                _ => None,
-            })
-            .next()
-            .ok_or(anyhow!("No interface has an IP on same subnet as gateway"))?;
-        debug!(
-            "IGD: gateway is {}, private IP is {}, making announce",
-            gateway.addr, private_ip
-        );
-
-        gateway.add_port(
-            igd::PortMappingProtocol::UDP,
-            external_port,
-            SocketAddrV4::new(private_ip, self.listen_port),
-            IGD_LEASE_DURATION.as_secs() as u32,
-            "Wireguard via wgautomesh",
-        )?;
-
-        Ok(())
     }
 
     fn make_packet(&self, gossip: &Gossip) -> Result<Vec<u8>> {
@@ -466,6 +445,7 @@ impl Daemon {
         Ok([&nonce[..], &ciphertext[..]].concat())
     }
 }
+
 
 struct State {
     peers: HashMap<Pubkey, PeerInfo>,
@@ -644,7 +624,11 @@ impl State {
                     endpoints
                 }
             };
-
+            let single_ip_cidr:u8 = if peer_cfg.address.is_ipv6(){
+                128
+            } else {
+                32
+            };
             if !endpoints.is_empty() {
                 let endpoint = endpoints[i % endpoints.len()].0;
 
@@ -657,7 +641,6 @@ impl State {
                     // Skip if we are already using that endpoint
                     continue;
                 }
-
                 info!("Configure {} with endpoint {}", peer_cfg.pubkey, endpoint);
                 Command::new("wg")
                     .args([
@@ -670,7 +653,7 @@ impl State {
                         "persistent-keepalive",
                         "10",
                         "allowed-ips",
-                        &format!("{}/32", peer_cfg.address),
+                        &format!("{}/{}", peer_cfg.address, single_ip_cidr),
                     ])
                     .output()?;
                 let packet = daemon.make_packet(&Gossip::Ping)?;
@@ -687,7 +670,7 @@ impl State {
                         "peer",
                         &peer_cfg.pubkey,
                         "allowed-ips",
-                        &format!("{}/32", peer_cfg.address),
+                        &format!("{}/{}", peer_cfg.address, single_ip_cidr),
                     ])
                     .output()?;
             }
